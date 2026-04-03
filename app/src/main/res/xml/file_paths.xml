@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path
+        name="scanned_pdfs"
+        path="scanned_pdfs/" />
+    <files-path
+        name="scanned_images"
+        path="scanned_images/" />
+    <cache-path
+        name="cache"
+        path="." />
+</paths>

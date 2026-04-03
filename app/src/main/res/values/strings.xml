@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">DocScanner</string>
+    <string name="scan">스캔</string>
+    <string name="share">공유</string>
+    <string name="delete">삭제</string>
+    <string name="empty_message">스캔한 문서가 없습니다</string>
+</resources>
