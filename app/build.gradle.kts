@@ -26,12 +26,12 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
 
     buildFeatures {
@@ -46,11 +46,5 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-
-    // Google ML Kit Document Scanner
-    // - 자동 문서 경계 감지
-    // - 원근 보정 (접힌 부분 자동 교정)
-    // - 화질 향상 (인쇄 노이즈 제거)
-    // - PDF / JPEG 출력 지원
     implementation(libs.mlkit.document.scanner)
 }
