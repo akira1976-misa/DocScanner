@@ -39,7 +39,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: ScannedFileAdapter
     private val scannedFiles = mutableListOf<ScannedFile>()
 
-    // 저장 폴더: Downloads/DocScanner
     private val SAVE_FOLDER = "DocScanner"
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,10 +52,11 @@ class MainActivity : AppCompatActivity() {
         loadExistingFiles()
     }
 
-    // ── ML Kit 문서 스캐너 초기화 ──────────────────────────────────
+    // ── ML Kit 스캐너 초기화 (고화질 설정) ────────────────────────
     private fun setupScanner() {
         val options = GmsDocumentScannerOptions.Builder()
             .setScannerMode(SCANNER_MODE_FULL)
+            // PDF + 고해상도 JPEG 동시 출력
             .setResultFormats(RESULT_FORMAT_PDF, RESULT_FORMAT_JPEG)
             .setPageLimit(20)
             .setGalleryImportAllowed(true)
@@ -78,28 +78,20 @@ class MainActivity : AppCompatActivity() {
 
     // ── 스캔 결과 처리 ─────────────────────────────────────────────
     private fun processScanResult(result: GmsDocumentScanningResult?) {
-        if (result == null) {
-            showMessage("스캔 결과를 가져올 수 없습니다.")
-            return
-        }
+        if (result == null) { showMessage("스캔 결과를 가져올 수 없습니다."); return }
 
         showLoading(true)
-
         lifecycleScope.launch {
             try {
-                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-                    .format(Date())
+                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
                 val fileName = "문서_$timestamp.pdf"
-
                 val pdfUri = result.pdf?.uri
+
                 if (pdfUri != null) {
                     val pageCount = result.pdf?.pageCount ?: 1
-
-                    // ── Downloads/DocScanner 폴더에 저장 ──
                     val savedFile = withContext(Dispatchers.IO) {
                         savePdfToDownloads(pdfUri, fileName)
                     }
-
                     if (savedFile != null) {
                         val scannedFile = ScannedFile(
                             name = fileName.removeSuffix(".pdf"),
@@ -111,12 +103,11 @@ class MainActivity : AppCompatActivity() {
                         scannedFiles.add(0, scannedFile)
                         adapter.notifyItemInserted(0)
                         binding.recyclerView.scrollToPosition(0)
-                        showMessage("✅ 저장 완료 → Downloads/DocScanner/$fileName")
+                        showMessage("✅ 저장 완료: Downloads/DocScanner/$fileName")
                     } else {
                         showMessage("저장에 실패했습니다.")
                     }
                 }
-
                 updateEmptyState()
             } catch (e: Exception) {
                 showMessage("오류: ${e.message}")
@@ -126,11 +117,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Downloads/DocScanner 폴더에 PDF 저장 ──────────────────────
+    // ── Downloads/DocScanner 폴더에 저장 ──────────────────────────
     private fun savePdfToDownloads(uri: Uri, fileName: String): File? {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10 이상: MediaStore 사용
                 val values = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, fileName)
                     put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
@@ -138,59 +128,36 @@ class MainActivity : AppCompatActivity() {
                         "${Environment.DIRECTORY_DOWNLOADS}/$SAVE_FOLDER")
                     put(MediaStore.Downloads.IS_PENDING, 1)
                 }
-
-                val collection = MediaStore.Downloads.getContentUri(
-                    MediaStore.VOLUME_EXTERNAL_PRIMARY
-                )
+                val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 val itemUri = contentResolver.insert(collection, values) ?: return null
-
-                contentResolver.openOutputStream(itemUri)?.use { output ->
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        input.copyTo(output)
-                    }
+                contentResolver.openOutputStream(itemUri)?.use { out ->
+                    contentResolver.openInputStream(uri)?.use { it.copyTo(out) }
                 }
-
                 values.clear()
                 values.put(MediaStore.Downloads.IS_PENDING, 0)
                 contentResolver.update(itemUri, values, null, null)
 
-                // 실제 File 경로로 변환 (목록 표시용)
-                val downloadDir = File(
+                File(
                     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                    SAVE_FOLDER
-                ).also { it.mkdirs() }
-                File(downloadDir, fileName)
-
+                    "$SAVE_FOLDER/$fileName"
+                )
             } else {
-                // Android 9 이하: 직접 파일 쓰기
-                val downloadDir = File(
+                val dir = File(
                     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                     SAVE_FOLDER
                 ).also { it.mkdirs() }
-
-                val outputFile = File(downloadDir, fileName)
-                contentResolver.openInputStream(uri)?.use { input ->
-                    outputFile.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                outputFile
+                val out = File(dir, fileName)
+                contentResolver.openInputStream(uri)?.use { it.copyTo(out.outputStream()) }
+                out
             }
         } catch (e: Exception) {
-            // Downloads 실패 시 앱 내부 저장소로 폴백
+            // 폴백: 앱 내부 저장소
             try {
-                val fallbackDir = File(filesDir, "scanned_pdfs").also { it.mkdirs() }
-                val fallbackFile = File(fallbackDir, fileName)
-                contentResolver.openInputStream(uri)?.use { input ->
-                    fallbackFile.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                showMessage("내부 저장소에 저장됨")
-                fallbackFile
-            } catch (e2: Exception) {
-                null
-            }
+                val dir = File(filesDir, "scanned_pdfs").also { it.mkdirs() }
+                val out = File(dir, fileName)
+                contentResolver.openInputStream(uri)?.use { it.copyTo(out.outputStream()) }
+                out
+            } catch (e2: Exception) { null }
         }
     }
 
@@ -208,42 +175,56 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // ── RecyclerView 설정 ──────────────────────────────────────────
-    private fun setupRecyclerView() {
-        adapter = ScannedFileAdapter(
-            files = scannedFiles,
-            onItemClick = { file -> openFile(file) },
-            onShareClick = { file -> shareFile(file) },
-            onDeleteClick = { file -> deleteFile(file) }
-        )
-        binding.recyclerView.apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
-            adapter = this@MainActivity.adapter
-        }
-    }
-
-    // ── 파일 열기 ──────────────────────────────────────────────────
+    // ── 파일 열기: 연결 프로그램 선택창 바로 표시 ─────────────────
     private fun openFile(file: ScannedFile) {
         try {
-            val uri = androidx.core.content.FileProvider.getUriForFile(
-                this, "${packageName}.fileprovider", file.file
-            )
-            val intent = Intent(Intent.ACTION_VIEW).apply {
+            // FileProvider URI (앱 내부 파일용)
+            val uri = try {
+                androidx.core.content.FileProvider.getUriForFile(
+                    this, "${packageName}.fileprovider", file.file
+                )
+            } catch (e: Exception) {
+                // Downloads 폴더 파일은 Uri.fromFile 사용
+                Uri.fromFile(file.file)
+            }
+
+            // 연결 프로그램 선택창을 바로 표시
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "application/pdf")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
-            startActivity(Intent.createChooser(intent, "PDF 열기"))
+
+            // 선택창 강제 표시 (기본 앱 무시)
+            val chooser = Intent.createChooser(viewIntent, "PDF 열기 — 앱 선택")
+            startActivity(chooser)
+
         } catch (e: Exception) {
-            showMessage("PDF 뷰어 앱이 없습니다.")
+            // PDF 앱이 아예 없는 경우 안내
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("PDF 뷰어 없음")
+                .setMessage("PDF를 열려면 뷰어 앱이 필요합니다.\n\nPlay 스토어에서 'Adobe Acrobat' 또는 'PDF Viewer'를 검색해 설치하세요.")
+                .setPositiveButton("Play 스토어 열기") { _, _ ->
+                    startActivity(
+                        Intent(Intent.ACTION_VIEW,
+                            Uri.parse("market://search?q=pdf+viewer&c=apps"))
+                    )
+                }
+                .setNegativeButton("취소", null)
+                .show()
         }
     }
 
     // ── 파일 공유 ──────────────────────────────────────────────────
     private fun shareFile(file: ScannedFile) {
         try {
-            val uri = androidx.core.content.FileProvider.getUriForFile(
-                this, "${packageName}.fileprovider", file.file
-            )
+            val uri = try {
+                androidx.core.content.FileProvider.getUriForFile(
+                    this, "${packageName}.fileprovider", file.file
+                )
+            } catch (e: Exception) {
+                Uri.fromFile(file.file)
+            }
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/pdf"
                 putExtra(Intent.EXTRA_STREAM, uri)
@@ -275,37 +256,45 @@ class MainActivity : AppCompatActivity() {
 
     // ── 기존 파일 불러오기 ─────────────────────────────────────────
     private fun loadExistingFiles() {
-        // Downloads/DocScanner 폴더 먼저 확인
         val downloadDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             SAVE_FOLDER
         )
-        // 내부 저장소 폴더도 확인 (이전 버전 호환)
         val internalDir = File(filesDir, "scanned_pdfs")
 
         listOf(downloadDir, internalDir).forEach { dir ->
             if (dir.exists()) {
                 dir.listFiles { f -> f.extension == "pdf" }
-                    ?.sortedByDescending { it.lastModified() }
                     ?.forEach { file ->
                         if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
-                            scannedFiles.add(
-                                ScannedFile(
-                                    name = file.nameWithoutExtension,
-                                    file = file,
-                                    pageCount = 0,
-                                    createdAt = file.lastModified(),
-                                    type = FileType.PDF
-                                )
-                            )
+                            scannedFiles.add(ScannedFile(
+                                name = file.nameWithoutExtension,
+                                file = file,
+                                pageCount = 0,
+                                createdAt = file.lastModified(),
+                                type = FileType.PDF
+                            ))
                         }
                     }
             }
         }
-
         scannedFiles.sortByDescending { it.createdAt }
         adapter.notifyDataSetChanged()
         updateEmptyState()
+    }
+
+    // ── RecyclerView 설정 ──────────────────────────────────────────
+    private fun setupRecyclerView() {
+        adapter = ScannedFileAdapter(
+            files = scannedFiles,
+            onItemClick = { file -> openFile(file) },
+            onShareClick = { file -> shareFile(file) },
+            onDeleteClick = { file -> deleteFile(file) }
+        )
+        binding.recyclerView.apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = this@MainActivity.adapter
+        }
     }
 
     private fun setupClickListeners() {
