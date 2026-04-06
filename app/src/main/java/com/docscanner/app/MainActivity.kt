@@ -1,8 +1,12 @@
 package com.docscanner.app
 
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.view.View
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
@@ -19,7 +23,9 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_FULL
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -32,6 +38,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var scannerLauncher: ActivityResultLauncher<IntentSenderRequest>
     private lateinit var adapter: ScannedFileAdapter
     private val scannedFiles = mutableListOf<ScannedFile>()
+
+    // 저장 폴더: Downloads/DocScanner
+    private val SAVE_FOLDER = "DocScanner"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,15 +56,14 @@ class MainActivity : AppCompatActivity() {
     // ── ML Kit 문서 스캐너 초기화 ──────────────────────────────────
     private fun setupScanner() {
         val options = GmsDocumentScannerOptions.Builder()
-            .setScannerMode(SCANNER_MODE_FULL)   // 전체 기능 (자동 감지 + 수동 조절)
+            .setScannerMode(SCANNER_MODE_FULL)
             .setResultFormats(RESULT_FORMAT_PDF, RESULT_FORMAT_JPEG)
-            .setPageLimit(20)                     // 최대 20페이지
-            .setGalleryImportAllowed(true)        // 갤러리에서 가져오기 허용
+            .setPageLimit(20)
+            .setGalleryImportAllowed(true)
             .build()
 
         scanner = GmsDocumentScanning.getClient(options)
 
-        // 스캐너 결과 수신
         scannerLauncher = registerForActivityResult(
             ActivityResultContracts.StartIntentSenderForResult()
         ) { result ->
@@ -81,17 +89,21 @@ class MainActivity : AppCompatActivity() {
             try {
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
                     .format(Date())
-                val fileName = "문서_$timestamp"
+                val fileName = "문서_$timestamp.pdf"
 
-                // PDF 저장
                 val pdfUri = result.pdf?.uri
                 if (pdfUri != null) {
-                    val pdfFile = savePdfToInternalStorage(pdfUri, "$fileName.pdf")
-                    if (pdfFile != null) {
-                        val pageCount = result.pdf?.pageCount ?: 1
+                    val pageCount = result.pdf?.pageCount ?: 1
+
+                    // ── Downloads/DocScanner 폴더에 저장 ──
+                    val savedFile = withContext(Dispatchers.IO) {
+                        savePdfToDownloads(pdfUri, fileName)
+                    }
+
+                    if (savedFile != null) {
                         val scannedFile = ScannedFile(
-                            name = fileName,
-                            file = pdfFile,
+                            name = fileName.removeSuffix(".pdf"),
+                            file = savedFile,
                             pageCount = pageCount,
                             createdAt = System.currentTimeMillis(),
                             type = FileType.PDF
@@ -99,20 +111,85 @@ class MainActivity : AppCompatActivity() {
                         scannedFiles.add(0, scannedFile)
                         adapter.notifyItemInserted(0)
                         binding.recyclerView.scrollToPosition(0)
-                        showMessage("PDF 저장 완료: $pageCount 페이지")
+                        showMessage("✅ 저장 완료 → Downloads/DocScanner/$fileName")
+                    } else {
+                        showMessage("저장에 실패했습니다.")
                     }
-                }
-
-                // JPEG 이미지도 저장 (미리보기용)
-                result.pages?.forEachIndexed { index, page ->
-                    saveImageToInternalStorage(page.imageUri, "${fileName}_page${index + 1}.jpg")
                 }
 
                 updateEmptyState()
             } catch (e: Exception) {
-                showMessage("저장 실패: ${e.message}")
+                showMessage("오류: ${e.message}")
             } finally {
                 showLoading(false)
+            }
+        }
+    }
+
+    // ── Downloads/DocScanner 폴더에 PDF 저장 ──────────────────────
+    private fun savePdfToDownloads(uri: Uri, fileName: String): File? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10 이상: MediaStore 사용
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+                    put(MediaStore.Downloads.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_DOWNLOADS}/$SAVE_FOLDER")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+
+                val collection = MediaStore.Downloads.getContentUri(
+                    MediaStore.VOLUME_EXTERNAL_PRIMARY
+                )
+                val itemUri = contentResolver.insert(collection, values) ?: return null
+
+                contentResolver.openOutputStream(itemUri)?.use { output ->
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        input.copyTo(output)
+                    }
+                }
+
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                contentResolver.update(itemUri, values, null, null)
+
+                // 실제 File 경로로 변환 (목록 표시용)
+                val downloadDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    SAVE_FOLDER
+                ).also { it.mkdirs() }
+                File(downloadDir, fileName)
+
+            } else {
+                // Android 9 이하: 직접 파일 쓰기
+                val downloadDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    SAVE_FOLDER
+                ).also { it.mkdirs() }
+
+                val outputFile = File(downloadDir, fileName)
+                contentResolver.openInputStream(uri)?.use { input ->
+                    outputFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                outputFile
+            }
+        } catch (e: Exception) {
+            // Downloads 실패 시 앱 내부 저장소로 폴백
+            try {
+                val fallbackDir = File(filesDir, "scanned_pdfs").also { it.mkdirs() }
+                val fallbackFile = File(fallbackDir, fileName)
+                contentResolver.openInputStream(uri)?.use { input ->
+                    fallbackFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                showMessage("내부 저장소에 저장됨")
+                fallbackFile
+            } catch (e2: Exception) {
+                null
             }
         }
     }
@@ -131,37 +208,6 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // ── 파일 저장 ──────────────────────────────────────────────────
-    private fun savePdfToInternalStorage(uri: Uri, fileName: String): File? {
-        return try {
-            val outputDir = File(filesDir, "scanned_pdfs").also { it.mkdirs() }
-            val outputFile = File(outputDir, fileName)
-            contentResolver.openInputStream(uri)?.use { input ->
-                outputFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            outputFile
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun saveImageToInternalStorage(uri: Uri, fileName: String): File? {
-        return try {
-            val outputDir = File(filesDir, "scanned_images").also { it.mkdirs() }
-            val outputFile = File(outputDir, fileName)
-            contentResolver.openInputStream(uri)?.use { input ->
-                outputFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            outputFile
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     // ── RecyclerView 설정 ──────────────────────────────────────────
     private fun setupRecyclerView() {
         adapter = ScannedFileAdapter(
@@ -178,26 +224,35 @@ class MainActivity : AppCompatActivity() {
 
     // ── 파일 열기 ──────────────────────────────────────────────────
     private fun openFile(file: ScannedFile) {
-        val intent = Intent(this, PdfViewerActivity::class.java).apply {
-            putExtra(PdfViewerActivity.EXTRA_FILE_PATH, file.file.absolutePath)
-            putExtra(PdfViewerActivity.EXTRA_FILE_NAME, file.name)
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "${packageName}.fileprovider", file.file
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/pdf")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "PDF 열기"))
+        } catch (e: Exception) {
+            showMessage("PDF 뷰어 앱이 없습니다.")
         }
-        startActivity(intent)
     }
 
     // ── 파일 공유 ──────────────────────────────────────────────────
     private fun shareFile(file: ScannedFile) {
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            this,
-            "${packageName}.fileprovider",
-            file.file
-        )
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/pdf"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "${packageName}.fileprovider", file.file
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/pdf"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "PDF 공유"))
+        } catch (e: Exception) {
+            showMessage("공유 실패: ${e.message}")
         }
-        startActivity(Intent.createChooser(intent, "PDF 공유"))
     }
 
     // ── 파일 삭제 ──────────────────────────────────────────────────
@@ -220,23 +275,36 @@ class MainActivity : AppCompatActivity() {
 
     // ── 기존 파일 불러오기 ─────────────────────────────────────────
     private fun loadExistingFiles() {
-        val dir = File(filesDir, "scanned_pdfs")
-        if (dir.exists()) {
-            dir.listFiles()
-                ?.sortedByDescending { it.lastModified() }
-                ?.forEach { file ->
-                    scannedFiles.add(
-                        ScannedFile(
-                            name = file.nameWithoutExtension,
-                            file = file,
-                            pageCount = 0,
-                            createdAt = file.lastModified(),
-                            type = FileType.PDF
-                        )
-                    )
-                }
-            adapter.notifyDataSetChanged()
+        // Downloads/DocScanner 폴더 먼저 확인
+        val downloadDir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            SAVE_FOLDER
+        )
+        // 내부 저장소 폴더도 확인 (이전 버전 호환)
+        val internalDir = File(filesDir, "scanned_pdfs")
+
+        listOf(downloadDir, internalDir).forEach { dir ->
+            if (dir.exists()) {
+                dir.listFiles { f -> f.extension == "pdf" }
+                    ?.sortedByDescending { it.lastModified() }
+                    ?.forEach { file ->
+                        if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
+                            scannedFiles.add(
+                                ScannedFile(
+                                    name = file.nameWithoutExtension,
+                                    file = file,
+                                    pageCount = 0,
+                                    createdAt = file.lastModified(),
+                                    type = FileType.PDF
+                                )
+                            )
+                        }
+                    }
+            }
         }
+
+        scannedFiles.sortByDescending { it.createdAt }
+        adapter.notifyDataSetChanged()
         updateEmptyState()
     }
 
@@ -257,6 +325,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showMessage(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 }
