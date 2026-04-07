@@ -52,11 +52,10 @@ class MainActivity : AppCompatActivity() {
         loadExistingFiles()
     }
 
-    // ── ML Kit 스캐너 초기화 (고화질 설정) ────────────────────────
+    // ── ML Kit 스캐너 초기화 ───────────────────────────────────────
     private fun setupScanner() {
         val options = GmsDocumentScannerOptions.Builder()
             .setScannerMode(SCANNER_MODE_FULL)
-            // PDF + 고해상도 JPEG 동시 출력
             .setResultFormats(RESULT_FORMAT_PDF, RESULT_FORMAT_JPEG)
             .setPageLimit(20)
             .setGalleryImportAllowed(true)
@@ -84,30 +83,51 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-                val fileName = "문서_$timestamp.pdf"
-                val pdfUri = result.pdf?.uri
+                val baseName  = "문서_$timestamp"
+
+                // ── PDF 저장 (Downloads/DocScanner) ──
+                val pdfUri   = result.pdf?.uri
+                val pageCount = result.pdf?.pageCount ?: 1
+                var savedPdf: File? = null
 
                 if (pdfUri != null) {
-                    val pageCount = result.pdf?.pageCount ?: 1
-                    val savedFile = withContext(Dispatchers.IO) {
-                        savePdfToDownloads(pdfUri, fileName)
-                    }
-                    if (savedFile != null) {
-                        val scannedFile = ScannedFile(
-                            name = fileName.removeSuffix(".pdf"),
-                            file = savedFile,
-                            pageCount = pageCount,
-                            createdAt = System.currentTimeMillis(),
-                            type = FileType.PDF
-                        )
-                        scannedFiles.add(0, scannedFile)
-                        adapter.notifyItemInserted(0)
-                        binding.recyclerView.scrollToPosition(0)
-                        showMessage("✅ 저장 완료: Downloads/DocScanner/$fileName")
-                    } else {
-                        showMessage("저장에 실패했습니다.")
+                    savedPdf = withContext(Dispatchers.IO) {
+                        savePdfToDownloads(pdfUri, "$baseName.pdf")
                     }
                 }
+
+                // ── JPEG 페이지 저장 (갤러리에 노출) ──
+                val jpegFiles = mutableListOf<File>()
+                result.pages?.forEachIndexed { index, page ->
+                    val jpegName = "${baseName}_p${index + 1}.jpg"
+                    val saved = withContext(Dispatchers.IO) {
+                        saveJpegToGallery(page.imageUri, jpegName)
+                    }
+                    if (saved != null) jpegFiles.add(saved)
+                }
+
+                // ── 목록에 추가: 첫 번째 JPEG 파일을 대표로 사용 ──
+                val representFile = jpegFiles.firstOrNull() ?: savedPdf
+                if (representFile != null) {
+                    val scannedFile = ScannedFile(
+                        name      = baseName,
+                        file      = representFile,
+                        pageCount = pageCount,
+                        createdAt = System.currentTimeMillis(),
+                        type      = if (jpegFiles.isNotEmpty()) FileType.IMAGE else FileType.PDF
+                    )
+                    scannedFiles.add(0, scannedFile)
+                    adapter.notifyItemInserted(0)
+                    binding.recyclerView.scrollToPosition(0)
+
+                    val msg = buildString {
+                        append("✅ 저장 완료 ($pageCount 페이지)")
+                        if (jpegFiles.isNotEmpty()) append("\n📷 갤러리에서도 확인 가능")
+                        if (savedPdf != null) append("\n📄 PDF: Downloads/DocScanner/")
+                    }
+                    showMessage(msg)
+                }
+
                 updateEmptyState()
             } catch (e: Exception) {
                 showMessage("오류: ${e.message}")
@@ -117,7 +137,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Downloads/DocScanner 폴더에 저장 ──────────────────────────
+    // ── JPEG를 갤러리(Pictures/DocScanner)에 저장 ─────────────────
+    private fun saveJpegToGallery(uri: Uri, fileName: String): File? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10 이상 — MediaStore로 갤러리에 직접 삽입
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_PICTURES}/$SAVE_FOLDER")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val collection = MediaStore.Images.Media.getContentUri(
+                    MediaStore.VOLUME_EXTERNAL_PRIMARY
+                )
+                val itemUri = contentResolver.insert(collection, values) ?: return null
+                contentResolver.openOutputStream(itemUri)?.use { out ->
+                    contentResolver.openInputStream(uri)?.use { it.copyTo(out) }
+                }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                contentResolver.update(itemUri, values, null, null)
+
+                // 실제 경로 반환 (목록 표시용)
+                File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    "$SAVE_FOLDER/$fileName"
+                )
+            } else {
+                // Android 9 이하 — 직접 파일 쓰기 후 미디어 스캔
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                    SAVE_FOLDER
+                ).also { it.mkdirs() }
+                val out = File(dir, fileName)
+                contentResolver.openInputStream(uri)?.use { it.copyTo(out.outputStream()) }
+
+                // 갤러리에 반영
+                @Suppress("DEPRECATION")
+                android.media.MediaScannerConnection.scanFile(
+                    this, arrayOf(out.absolutePath), arrayOf("image/jpeg"), null
+                )
+                out
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ── PDF를 Downloads/DocScanner에 저장 ─────────────────────────
     private fun savePdfToDownloads(uri: Uri, fileName: String): File? {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -128,7 +197,9 @@ class MainActivity : AppCompatActivity() {
                         "${Environment.DIRECTORY_DOWNLOADS}/$SAVE_FOLDER")
                     put(MediaStore.Downloads.IS_PENDING, 1)
                 }
-                val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val collection = MediaStore.Downloads.getContentUri(
+                    MediaStore.VOLUME_EXTERNAL_PRIMARY
+                )
                 val itemUri = contentResolver.insert(collection, values) ?: return null
                 contentResolver.openOutputStream(itemUri)?.use { out ->
                     contentResolver.openInputStream(uri)?.use { it.copyTo(out) }
@@ -151,7 +222,6 @@ class MainActivity : AppCompatActivity() {
                 out
             }
         } catch (e: Exception) {
-            // 폴백: 앱 내부 저장소
             try {
                 val dir = File(filesDir, "scanned_pdfs").also { it.mkdirs() }
                 val out = File(dir, fileName)
@@ -161,76 +231,85 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── 스캔 시작 ──────────────────────────────────────────────────
-    private fun startScanning() {
-        showLoading(true)
-        scanner.getStartScanIntent(this)
-            .addOnSuccessListener { intentSender ->
-                showLoading(false)
-                scannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-            }
-            .addOnFailureListener { e ->
-                showLoading(false)
-                showMessage("스캐너를 시작할 수 없습니다: ${e.message}")
-            }
-    }
-
-    // ── 파일 열기: 연결 프로그램 선택창 바로 표시 ─────────────────
+    // ── 파일 열기 (이미지 → 갤러리/삼성노트, PDF → 연결 앱 선택) ─
     private fun openFile(file: ScannedFile) {
         try {
-            // FileProvider URI (앱 내부 파일용)
-            val uri = try {
-                androidx.core.content.FileProvider.getUriForFile(
-                    this, "${packageName}.fileprovider", file.file
-                )
-            } catch (e: Exception) {
-                // Downloads 폴더 파일은 Uri.fromFile 사용
-                Uri.fromFile(file.file)
+            val isImage = file.type == FileType.IMAGE ||
+                file.file.extension.lowercase() in listOf("jpg", "jpeg", "png")
+
+            val (mimeType, uri) = if (isImage) {
+                // 이미지: MediaStore URI로 갤러리 앱에서 열기
+                val contentUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    // Pictures/DocScanner 에서 MediaStore URI 조회
+                    getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
+                } else {
+                    Uri.fromFile(file.file)
+                }
+                Pair("image/jpeg", contentUri)
+            } else {
+                // PDF: FileProvider URI
+                val pdfUri = try {
+                    androidx.core.content.FileProvider.getUriForFile(
+                        this, "${packageName}.fileprovider", file.file
+                    )
+                } catch (e: Exception) { Uri.fromFile(file.file) }
+                Pair("application/pdf", pdfUri)
             }
 
-            // 연결 프로그램 선택창을 바로 표시
-            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/pdf")
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
 
-            // 선택창 강제 표시 (기본 앱 무시)
-            val chooser = Intent.createChooser(viewIntent, "PDF 열기 — 앱 선택")
-            startActivity(chooser)
+            // 연결 프로그램 선택창 표시
+            startActivity(Intent.createChooser(intent,
+                if (isImage) "이미지 열기 — 갤러리 / 삼성노트"
+                else "PDF 열기"))
 
         } catch (e: Exception) {
-            // PDF 앱이 아예 없는 경우 안내
-            androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle("PDF 뷰어 없음")
-                .setMessage("PDF를 열려면 뷰어 앱이 필요합니다.\n\nPlay 스토어에서 'Adobe Acrobat' 또는 'PDF Viewer'를 검색해 설치하세요.")
-                .setPositiveButton("Play 스토어 열기") { _, _ ->
-                    startActivity(
-                        Intent(Intent.ACTION_VIEW,
-                            Uri.parse("market://search?q=pdf+viewer&c=apps"))
-                    )
-                }
-                .setNegativeButton("취소", null)
-                .show()
+            showMessage("열기 실패: 해당 파일을 열 수 있는 앱이 없습니다.")
         }
+    }
+
+    // MediaStore에서 파일 경로로 URI 조회
+    private fun getMediaStoreUri(file: File): Uri? {
+        return try {
+            val projection = arrayOf(MediaStore.Images.Media._ID)
+            val selection  = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
+            val args       = arrayOf(file.name)
+            contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection, selection, args, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+                    Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
+                } else null
+            }
+        } catch (e: Exception) { null }
     }
 
     // ── 파일 공유 ──────────────────────────────────────────────────
     private fun shareFile(file: ScannedFile) {
         try {
-            val uri = try {
-                androidx.core.content.FileProvider.getUriForFile(
-                    this, "${packageName}.fileprovider", file.file
-                )
-            } catch (e: Exception) {
-                Uri.fromFile(file.file)
+            val isImage = file.type == FileType.IMAGE ||
+                file.file.extension.lowercase() in listOf("jpg", "jpeg", "png")
+            val uri = if (isImage) {
+                getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
+            } else {
+                try {
+                    androidx.core.content.FileProvider.getUriForFile(
+                        this, "${packageName}.fileprovider", file.file
+                    )
+                } catch (e: Exception) { Uri.fromFile(file.file) }
             }
             val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/pdf"
+                type = if (isImage) "image/jpeg" else "application/pdf"
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(Intent.createChooser(intent, "PDF 공유"))
+            startActivity(Intent.createChooser(intent, "공유"))
         } catch (e: Exception) {
             showMessage("공유 실패: ${e.message}")
         }
@@ -243,12 +322,11 @@ class MainActivity : AppCompatActivity() {
             .setMessage("'${file.name}'을(를) 삭제하시겠습니까?")
             .setPositiveButton("삭제") { _, _ ->
                 val index = scannedFiles.indexOf(file)
-                if (file.file.delete()) {
-                    scannedFiles.removeAt(index)
-                    adapter.notifyItemRemoved(index)
-                    updateEmptyState()
-                    showMessage("삭제되었습니다.")
-                }
+                file.file.delete()
+                scannedFiles.removeAt(index)
+                adapter.notifyItemRemoved(index)
+                updateEmptyState()
+                showMessage("삭제되었습니다.")
             }
             .setNegativeButton("취소", null)
             .show()
@@ -256,12 +334,33 @@ class MainActivity : AppCompatActivity() {
 
     // ── 기존 파일 불러오기 ─────────────────────────────────────────
     private fun loadExistingFiles() {
+        val picturesDir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+            SAVE_FOLDER
+        )
         val downloadDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
             SAVE_FOLDER
         )
         val internalDir = File(filesDir, "scanned_pdfs")
 
+        // JPEG 파일 (Pictures/DocScanner)
+        if (picturesDir.exists()) {
+            picturesDir.listFiles { f -> f.extension.lowercase() in listOf("jpg","jpeg") }
+                ?.forEach { file ->
+                    if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
+                        scannedFiles.add(ScannedFile(
+                            name = file.nameWithoutExtension,
+                            file = file,
+                            pageCount = 1,
+                            createdAt = file.lastModified(),
+                            type = FileType.IMAGE
+                        ))
+                    }
+                }
+        }
+
+        // PDF 파일 (Downloads/DocScanner + 내부)
         listOf(downloadDir, internalDir).forEach { dir ->
             if (dir.exists()) {
                 dir.listFiles { f -> f.extension == "pdf" }
@@ -278,6 +377,7 @@ class MainActivity : AppCompatActivity() {
                     }
             }
         }
+
         scannedFiles.sortByDescending { it.createdAt }
         adapter.notifyDataSetChanged()
         updateEmptyState()
