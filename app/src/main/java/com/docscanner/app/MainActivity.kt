@@ -2,6 +2,8 @@ package com.docscanner.app
 
 import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -26,6 +28,7 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -77,23 +80,32 @@ class MainActivity : AppCompatActivity() {
             try {
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
                 val baseName = "문서_$timestamp"
-                val pdfUri = result.pdf?.uri
                 val pageCount = result.pdf?.pageCount ?: 1
-                var savedPdf: File? = null
 
-                if (pdfUri != null) {
-                    savedPdf = withContext(Dispatchers.IO) {
-                        savePdfToDownloads(pdfUri, "$baseName.pdf")
-                    }
-                }
-
+                // ── JPEG 페이지: 손가락 제거 후 갤러리 저장 ──
                 val jpegFiles = mutableListOf<File>()
                 result.pages?.forEachIndexed { index, page ->
                     val jpegName = "${baseName}_p${index + 1}.jpg"
                     val saved = withContext(Dispatchers.IO) {
-                        saveJpegToGallery(page.imageUri, jpegName)
+                        // 1) URI → Bitmap 디코드
+                        val raw = contentResolver.openInputStream(page.imageUri)
+                            ?.use { BitmapFactory.decodeStream(it) }
+                        // 2) 손가락·도구 제거
+                        val cleaned = raw?.let { FingerRemover.removeFingers(it) } ?: raw
+                        // 3) 갤러리 저장
+                        if (cleaned != null) saveCleanedJpeg(cleaned, jpegName)
+                        else null
                     }
                     if (saved != null) jpegFiles.add(saved)
+                }
+
+                // ── PDF 저장 ──
+                val pdfUri = result.pdf?.uri
+                var savedPdf: File? = null
+                if (pdfUri != null) {
+                    savedPdf = withContext(Dispatchers.IO) {
+                        savePdfToDownloads(pdfUri, "$baseName.pdf")
+                    }
                 }
 
                 val representFile = jpegFiles.firstOrNull() ?: savedPdf
@@ -108,7 +120,7 @@ class MainActivity : AppCompatActivity() {
                     scannedFiles.add(0, scannedFile)
                     adapter.notifyItemInserted(0)
                     binding.recyclerView.scrollToPosition(0)
-                    showMessage("✅ 저장 완료 ($pageCount 페이지) — 갤러리: DocScanner 앨범")
+                    showMessage("✅ 저장 완료 ($pageCount 페이지) — 손가락 자동 제거 적용")
                 }
                 updateEmptyState()
             } catch (e: Exception) {
@@ -119,8 +131,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveJpegToGallery(uri: Uri, fileName: String): File? {
+    // ── 손가락 제거된 Bitmap을 갤러리(Pictures/DocScanner)에 저장 ──
+    private fun saveCleanedJpeg(bitmap: Bitmap, fileName: String): File? {
         return try {
+            val jpegBytes = ByteArrayOutputStream().also {
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)
+            }.toByteArray()
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
@@ -132,9 +149,7 @@ class MainActivity : AppCompatActivity() {
                 val collection = MediaStore.Images.Media.getContentUri(
                     MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 val itemUri = contentResolver.insert(collection, values) ?: return null
-                contentResolver.openOutputStream(itemUri)?.use { out ->
-                    contentResolver.openInputStream(uri)?.use { it.copyTo(out) }
-                }
+                contentResolver.openOutputStream(itemUri)?.use { it.write(jpegBytes) }
                 values.clear()
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)
                 contentResolver.update(itemUri, values, null, null)
@@ -148,7 +163,7 @@ class MainActivity : AppCompatActivity() {
                     SAVE_FOLDER
                 ).also { it.mkdirs() }
                 val out = File(dir, fileName)
-                contentResolver.openInputStream(uri)?.use { it.copyTo(out.outputStream()) }
+                out.writeBytes(jpegBytes)
                 android.media.MediaScannerConnection.scanFile(
                     applicationContext, arrayOf(out.absolutePath), arrayOf("image/jpeg"), null
                 )
@@ -240,10 +255,9 @@ class MainActivity : AppCompatActivity() {
         return try {
             val projection = arrayOf(MediaStore.Images.Media._ID)
             val selection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
-            val args = arrayOf(file.name)
             contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection, selection, args, null
+                projection, selection, arrayOf(file.name), null
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val id = cursor.getLong(
@@ -310,31 +324,25 @@ class MainActivity : AppCompatActivity() {
                 if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
                     scannedFiles.add(ScannedFile(
                         name = file.nameWithoutExtension,
-                        file = file,
-                        pageCount = 1,
+                        file = file, pageCount = 1,
                         createdAt = file.lastModified(),
-                        type = FileType.IMAGE
-                    ))
+                        type = FileType.IMAGE))
                 }
             }
         }
-
         listOf(downloadDir, internalDir).forEach { dir ->
             if (dir.exists()) {
                 dir.listFiles { f -> f.extension == "pdf" }?.forEach { file ->
                     if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
                         scannedFiles.add(ScannedFile(
                             name = file.nameWithoutExtension,
-                            file = file,
-                            pageCount = 0,
+                            file = file, pageCount = 0,
                             createdAt = file.lastModified(),
-                            type = FileType.PDF
-                        ))
+                            type = FileType.PDF))
                     }
                 }
             }
         }
-
         scannedFiles.sortByDescending { it.createdAt }
         adapter.notifyDataSetChanged()
         updateEmptyState()
