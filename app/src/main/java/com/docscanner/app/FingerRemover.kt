@@ -5,31 +5,40 @@ import android.graphics.Color
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 
 object FingerRemover {
 
-    /**
-     * 스캔 이미지에서 손가락·도구를 감지하고 주변 색으로 채워 제거합니다.
-     * 1) 피부색 감지 (RGB 규칙 기반)
-     * 2) 마스크 확장 (경계 잔여물 제거)
-     * 3) 인페인팅 (주변 비-피부 픽셀로 채우기)
-     */
     fun removeFingers(source: Bitmap): Bitmap {
         val w = source.width
         val h = source.height
-
-        // 원본 픽셀 배열 복사
         val pixels = IntArray(w * h)
         source.getPixels(pixels, 0, w, 0, 0, w, h)
 
         // ── 1. 피부색 마스크 생성 ──
         val skinMask = BooleanArray(w * h) { isSkin(pixels[it]) }
 
-        // ── 2. 마스크 팽창 (손가락 경계 제거용, 12픽셀) ──
-        val dilated = dilateMask(skinMask, w, h, radius = 12)
+        // ── 2. 문서 컨텐츠 보호 마스크 생성 ──
+        // 채도 높은 색상(문서의 색깔 영역)과 어두운 색상(검정 텍스트, 헤더)은 보호
+        val protectMask = BooleanArray(w * h) { isDocumentContent(pixels[it]) }
 
-        // ── 3. 인페인팅 ──
+        // ── 3. 보호 영역과 피부 마스크 합성: 보호 픽셀은 피부 마스크에서 제외 ──
+        for (i in pixels.indices) {
+            if (protectMask[i]) skinMask[i] = false
+        }
+
+        // ── 4. 연결된 피부 영역 중 문서 가장자리에 있는 것만 제거 ──
+        // (문서 중앙의 살색 그림이나 얼굴 사진은 보존)
+        val edgeSkinMask = filterEdgeSkin(skinMask, w, h)
+
+        // ── 5. 마스크 팽창 (경계 잔여물 제거) ──
+        val dilated = dilateMask(edgeSkinMask, w, h, radius = 8)
+
+        // ── 6. 보호 마스크 재적용 (팽창으로 인한 문서 내용 침범 방지) ──
+        for (i in pixels.indices) {
+            if (protectMask[i]) dilated[i] = false
+        }
+
+        // ── 7. 인페인팅 ──
         val result = inpaint(pixels.copyOf(), dilated, w, h)
 
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also {
@@ -37,40 +46,119 @@ object FingerRemover {
         }
     }
 
-    // ── 피부색 감지 (RGB 기반) ─────────────────────────────────────
+    // ── 피부색 판별 (더 엄격한 기준) ─────────────────────────────
     private fun isSkin(pixel: Int): Boolean {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
 
-        // 너무 어둡거나 흰색(용지)에 가까운 픽셀은 제외
-        if (r + g + b < 80) return false          // 너무 어두움
-        if (r > 230 && g > 220 && b > 210) return false  // 흰 용지
-        if (abs(r - g) < 10 && abs(g - b) < 10)  return false  // 회색 계열
+        // 밝기 범위 필터 (너무 어둡거나 너무 밝으면 피부 아님)
+        val brightness = (r + g + b) / 3
+        if (brightness < 60 || brightness > 230) return false
 
-        // 피부색 규칙 (Kovac 알고리즘 기반)
+        // 흰색/회색 계열 제외 (용지, 텍스트 배경)
+        val maxC = max(r, max(g, b))
+        val minC = min(r, min(g, b))
+        val saturation = if (maxC == 0) 0f else (maxC - minC).toFloat() / maxC
+        if (saturation < 0.08f) return false  // 무채색 제외
+
+        // 채도 높은 색상 제외 (문서의 파란색, 빨간색 헤더 등)
+        if (saturation > 0.65f) return false
+
+        // R이 지배적이어야 함 (피부색의 핵심 조건)
+        if (r <= g || r <= b) return false
+        if (r - g < 10) return false
+
+        // HSV 색상각 기반 피부색 범위 (0~25도 = 살구/주황/갈색 계열)
+        val hue = getHue(r, g, b)
+        if (hue < 0f || hue > 28f) return false
+
+        // 피부색 RGB 비율 조건 (Kovac 기반, 더 엄격)
         val rule1 = r > 95 && g > 40 && b > 20 &&
-            (max(r, max(g, b)) - min(r, min(g, b))) > 15 &&
-            abs(r - g) > 15 && r > g && r > b
+            (maxC - minC) > 15 &&
+            abs(r - g) > 15 && r > g && r > b &&
+            r.toFloat() / g > 1.1f
 
-        val rule2 = r > 200 && g > 140 && b > 100 &&
-            r > g && r > b
+        val rule2 = r in 170..255 && g in 100..180 && b in 50..130 &&
+            r > g && g > b
 
-        // HSV 기반 보조 판별
-        val maxC = max(r, max(g, b)).toFloat()
-        val minC = min(r, min(g, b)).toFloat()
-        val delta = maxC - minC
-        val hue = when {
-            delta < 1f -> 0f
-            maxC == r.toFloat() -> 60f * (((g - b) / delta) % 6)
-            maxC == g.toFloat() -> 60f * ((b - r) / delta + 2)
-            else                -> 60f * ((r - g) / delta + 4)
-        }.let { if (it < 0) it + 360f else it }
+        return rule1 || rule2
+    }
 
-        val sat = if (maxC == 0f) 0f else delta / maxC
-        val rule3 = hue in 0f..35f && sat in 0.15f..0.85f && maxC / 255f > 0.25f
+    // ── 문서 컨텐츠 보호 판별 ─────────────────────────────────────
+    // 어두운 색, 채도 높은 색, 짙은 텍스트 등은 문서 내용으로 보호
+    private fun isDocumentContent(pixel: Int): Boolean {
+        val r = Color.red(pixel)
+        val g = Color.green(pixel)
+        val b = Color.blue(pixel)
 
-        return rule1 || rule2 || rule3
+        val brightness = (r + g + b) / 3
+        val maxC = max(r, max(g, b))
+        val minC = min(r, min(g, b))
+        val saturation = if (maxC == 0) 0f else (maxC - minC).toFloat() / maxC
+
+        // 어두운 색상 (검정, 짙은 회색, 어두운 헤더 배경) 보호
+        if (brightness < 80) return true
+
+        // 채도 높은 색상 (파란색 표, 빨간색 헤더 등) 보호
+        if (saturation > 0.35f) {
+            val hue = getHue(r, g, b)
+            // 피부색(0~28도) 범위는 제외하고 나머지 채도 높은 색은 보호
+            if (hue < 0f || hue > 30f) return true
+        }
+
+        // 거의 흰색 (용지)은 보호 대상에서 제외 (인페인팅 대상)
+        if (brightness > 200 && saturation < 0.1f) return false
+
+        return false
+    }
+
+    // ── 가장자리에 위치한 피부 영역만 필터링 ─────────────────────
+    // 이미지 가장자리 20% 안에 포함된 피부 덩어리만 제거 대상으로 설정
+    private fun filterEdgeSkin(mask: BooleanArray, w: Int, h: Int): BooleanArray {
+        val result = BooleanArray(w * h)
+        val edgeW = (w * 0.22).toInt()
+        val edgeH = (h * 0.22).toInt()
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                if (!mask[y * w + x]) continue
+                val inEdge = x < edgeW || x > w - edgeW ||
+                    y < edgeH || y > h - edgeH
+                if (inEdge) result[y * w + x] = true
+            }
+        }
+
+        // 가장자리 피부와 연결된 내부 피부도 포함
+        val visited = BooleanArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                if (result[y * w + x] && !visited[y * w + x]) {
+                    floodFill(mask, result, visited, x, y, w, h)
+                }
+            }
+        }
+        return result
+    }
+
+    private fun floodFill(
+        mask: BooleanArray, result: BooleanArray, visited: BooleanArray,
+        startX: Int, startY: Int, w: Int, h: Int
+    ) {
+        val queue = ArrayDeque<Pair<Int, Int>>()
+        queue.add(startX to startY)
+        while (queue.isNotEmpty()) {
+            val (x, y) = queue.removeFirst()
+            val idx = y * w + x
+            if (x < 0 || x >= w || y < 0 || y >= h) continue
+            if (visited[idx] || !mask[idx]) continue
+            visited[idx] = true
+            result[idx] = true
+            queue.add((x - 1) to y)
+            queue.add((x + 1) to y)
+            queue.add(x to (y - 1))
+            queue.add(x to (y + 1))
+        }
     }
 
     // ── 마스크 팽창 ────────────────────────────────────────────────
@@ -79,12 +167,10 @@ object FingerRemover {
         for (y in 0 until h) {
             for (x in 0 until w) {
                 if (!mask[y * w + x]) continue
-                // 주변 radius 범위의 픽셀도 마스크 처리
                 for (dy in -radius..radius) {
                     for (dx in -radius..radius) {
                         if (dx * dx + dy * dy > radius * radius) continue
-                        val nx = x + dx
-                        val ny = y + dy
+                        val nx = x + dx; val ny = y + dy
                         if (nx in 0 until w && ny in 0 until h)
                             result[ny * w + nx] = true
                     }
@@ -94,10 +180,9 @@ object FingerRemover {
         return result
     }
 
-    // ── 인페인팅: 마스크 영역을 가장 가까운 비-마스크 픽셀로 채움 ──
+    // ── 인페인팅 ──────────────────────────────────────────────────
     private fun inpaint(pixels: IntArray, mask: BooleanArray, w: Int, h: Int): IntArray {
-
-        // 문서 배경색 추정 (가장자리 비-피부 픽셀 평균)
+        // 배경색 추정 (가장자리 비-마스크 픽셀 평균)
         var rSum = 0L; var gSum = 0L; var bSum = 0L; var cnt = 0
         val edgeRange = (w * 0.05).toInt().coerceAtLeast(5)
         for (y in 0 until h) {
@@ -112,31 +197,23 @@ object FingerRemover {
                 }
             }
         }
-        val bgColor = if (cnt > 0) {
+        val bgColor = if (cnt > 0)
             Color.rgb((rSum / cnt).toInt(), (gSum / cnt).toInt(), (bSum / cnt).toInt())
-        } else Color.WHITE
+        else Color.WHITE
 
-        // 1차: 배경색으로 일단 채움
-        for (i in pixels.indices) {
-            if (mask[i]) pixels[i] = bgColor
-        }
+        for (i in pixels.indices) { if (mask[i]) pixels[i] = bgColor }
 
-        // 2차: 마스크 경계에서 안쪽으로 실제 주변 픽셀 블렌딩 (여러 번 반복)
         val temp = pixels.copyOf()
-        repeat(3) {
+        repeat(4) {
             for (y in 1 until h - 1) {
                 for (x in 1 until w - 1) {
                     if (!mask[y * w + x]) continue
-                    // 4방향 이웃 중 비-마스크 픽셀 평균
                     var r = 0; var g = 0; var b = 0; var n = 0
                     listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1,
-                           -1 to -1, 1 to -1, -1 to 1, 1 to 1).forEach { (dx, dy) ->
-                        val nx = x + dx; val ny = y + dy
-                        if (nx in 0 until w && ny in 0 until h) {
-                            val nb = temp[ny * w + nx]
-                            r += Color.red(nb); g += Color.green(nb)
-                            b += Color.blue(nb); n++
-                        }
+                        -1 to -1, 1 to -1, -1 to 1, 1 to 1).forEach { (dx, dy) ->
+                        val nb = temp[(y + dy) * w + (x + dx)]
+                        r += Color.red(nb); g += Color.green(nb)
+                        b += Color.blue(nb); n++
                     }
                     if (n > 0) pixels[y * w + x] = Color.rgb(r / n, g / n, b / n)
                 }
@@ -144,5 +221,18 @@ object FingerRemover {
             pixels.copyInto(temp)
         }
         return pixels
+    }
+
+    private fun getHue(r: Int, g: Int, b: Int): Float {
+        val maxC = max(r, max(g, b)).toFloat()
+        val minC = min(r, min(g, b)).toFloat()
+        val delta = maxC - minC
+        if (delta < 1f) return -1f
+        val hue = when {
+            maxC == r.toFloat() -> 60f * (((g - b) / delta) % 6)
+            maxC == g.toFloat() -> 60f * ((b - r) / delta + 2)
+            else                -> 60f * ((r - g) / delta + 4)
+        }
+        return if (hue < 0) hue + 360f else hue
     }
 }
