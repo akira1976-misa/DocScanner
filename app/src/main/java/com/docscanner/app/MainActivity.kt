@@ -22,7 +22,7 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanner
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_FORMAT_JPEG
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_FORMAT_PDF
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_FULL
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_BASE
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import kotlinx.coroutines.Dispatchers
@@ -55,11 +55,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupScanner() {
         val options = GmsDocumentScannerOptions.Builder()
-            .setScannerMode(SCANNER_MODE_FULL)
+            // SCANNER_MODE_BASE: 가이드 박스 떨림 없는 안정적인 수동 모드
+            .setScannerMode(SCANNER_MODE_BASE)
             .setResultFormats(RESULT_FORMAT_PDF, RESULT_FORMAT_JPEG)
             .setPageLimit(20)
             .setGalleryImportAllowed(true)
             .build()
+
         scanner = GmsDocumentScanning.getClient(options)
         scannerLauncher = registerForActivityResult(
             ActivityResultContracts.StartIntentSenderForResult()
@@ -87,40 +89,36 @@ class MainActivity : AppCompatActivity() {
                 result.pages?.forEachIndexed { index, page ->
                     val jpegName = "${baseName}_p${index + 1}.jpg"
                     val saved = withContext(Dispatchers.IO) {
-                        // 1) URI → Bitmap 디코드
                         val raw = contentResolver.openInputStream(page.imageUri)
                             ?.use { BitmapFactory.decodeStream(it) }
-                        // 2) 손가락·도구 제거
                         val cleaned = raw?.let { FingerRemover.removeFingers(it) } ?: raw
-                        // 3) 갤러리 저장
-                        if (cleaned != null) saveCleanedJpeg(cleaned, jpegName)
-                        else null
+                        if (cleaned != null) saveCleanedJpeg(cleaned, jpegName) else null
                     }
                     if (saved != null) jpegFiles.add(saved)
                 }
 
-                // ── PDF 저장 ──
+                // ── PDF 저장 (Downloads/DocScanner) ──
                 val pdfUri = result.pdf?.uri
-                var savedPdf: File? = null
                 if (pdfUri != null) {
-                    savedPdf = withContext(Dispatchers.IO) {
+                    withContext(Dispatchers.IO) {
                         savePdfToDownloads(pdfUri, "$baseName.pdf")
                     }
                 }
 
-                val representFile = jpegFiles.firstOrNull() ?: savedPdf
+                // ── 목록에는 JPEG 대표 항목 1개만 추가 ──
+                val representFile = jpegFiles.firstOrNull()
                 if (representFile != null) {
                     val scannedFile = ScannedFile(
                         name = baseName,
                         file = representFile,
                         pageCount = pageCount,
                         createdAt = System.currentTimeMillis(),
-                        type = if (jpegFiles.isNotEmpty()) FileType.IMAGE else FileType.PDF
+                        type = FileType.IMAGE
                     )
                     scannedFiles.add(0, scannedFile)
                     adapter.notifyItemInserted(0)
                     binding.recyclerView.scrollToPosition(0)
-                    showMessage("✅ 저장 완료 ($pageCount 페이지) — 손가락 자동 제거 적용")
+                    showMessage("✅ 저장 완료 ($pageCount 페이지)")
                 }
                 updateEmptyState()
             } catch (e: Exception) {
@@ -131,7 +129,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── 손가락 제거된 Bitmap을 갤러리(Pictures/DocScanner)에 저장 ──
     private fun saveCleanedJpeg(bitmap: Bitmap, fileName: String): File? {
         return try {
             val jpegBytes = ByteArrayOutputStream().also {
@@ -204,14 +201,7 @@ class MainActivity : AppCompatActivity() {
                 contentResolver.openInputStream(uri)?.use { it.copyTo(out.outputStream()) }
                 out
             }
-        } catch (e: Exception) {
-            try {
-                val dir = File(filesDir, "scanned_pdfs").also { it.mkdirs() }
-                val out = File(dir, fileName)
-                contentResolver.openInputStream(uri)?.use { it.copyTo(out.outputStream()) }
-                out
-            } catch (e2: Exception) { null }
-        }
+        } catch (e: Exception) { null }
     }
 
     private fun startScanning() {
@@ -227,32 +217,27 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
+    // ── 파일 열기: MediaStore URI로 갤러리/삼성노트 선택창 표시 ───
     private fun openFile(file: ScannedFile) {
         try {
-            val isImage = file.type == FileType.IMAGE ||
-                file.file.extension.lowercase() in listOf("jpg", "jpeg", "png")
-            val uri = if (isImage) {
-                getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
-            } else {
-                try {
-                    androidx.core.content.FileProvider.getUriForFile(
-                        this, "${packageName}.fileprovider", file.file)
-                } catch (e: Exception) { Uri.fromFile(file.file) }
-            }
+            // MediaStore에서 URI 조회 (갤러리 앱이 인식하는 URI)
+            val uri = getMediaStoreUri(file.file)
+                ?: Uri.fromFile(file.file)
+
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, if (isImage) "image/jpeg" else "application/pdf")
+                setDataAndType(uri, "image/jpeg")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
-            startActivity(Intent.createChooser(intent,
-                if (isImage) "이미지 열기 — 갤러리 / 삼성노트" else "PDF 열기"))
+            startActivity(Intent.createChooser(intent, "이미지 열기 — 갤러리 / 삼성노트"))
         } catch (e: Exception) {
-            showMessage("열기 실패: 해당 파일을 열 수 있는 앱이 없습니다.")
+            showMessage("열기 실패: 갤러리 앱을 확인해 주세요.")
         }
     }
 
     private fun getMediaStoreUri(file: File): Uri? {
         return try {
+            // 파일명으로 MediaStore 검색
             val projection = arrayOf(MediaStore.Images.Media._ID)
             val selection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
             contentResolver.query(
@@ -271,18 +256,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun shareFile(file: ScannedFile) {
         try {
-            val isImage = file.type == FileType.IMAGE ||
-                file.file.extension.lowercase() in listOf("jpg", "jpeg", "png")
-            val uri = if (isImage) {
-                getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
-            } else {
-                try {
-                    androidx.core.content.FileProvider.getUriForFile(
-                        this, "${packageName}.fileprovider", file.file)
-                } catch (e: Exception) { Uri.fromFile(file.file) }
-            }
+            val uri = getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
             val intent = Intent(Intent.ACTION_SEND).apply {
-                type = if (isImage) "image/jpeg" else "application/pdf"
+                type = "image/jpeg"
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -298,7 +274,12 @@ class MainActivity : AppCompatActivity() {
             .setMessage("'${file.name}'을(를) 삭제하시겠습니까?")
             .setPositiveButton("삭제") { _, _ ->
                 val index = scannedFiles.indexOf(file)
-                file.file.delete()
+                // MediaStore에서도 삭제
+                try {
+                    val uri = getMediaStoreUri(file.file)
+                    if (uri != null) contentResolver.delete(uri, null, null)
+                    else file.file.delete()
+                } catch (e: Exception) { file.file.delete() }
                 scannedFiles.removeAt(index)
                 adapter.notifyItemRemoved(index)
                 updateEmptyState()
@@ -308,41 +289,32 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ── 기존 파일 불러오기: JPEG만 로드해서 중복 제거 ─────────────
     private fun loadExistingFiles() {
         val picturesDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-            SAVE_FOLDER)
-        val downloadDir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            SAVE_FOLDER)
-        val internalDir = File(filesDir, "scanned_pdfs")
+            SAVE_FOLDER
+        )
 
+        // Pictures/DocScanner 의 JPEG 파일만 로드
         if (picturesDir.exists()) {
             picturesDir.listFiles { f ->
                 f.extension.lowercase() in listOf("jpg", "jpeg")
-            }?.forEach { file ->
-                if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
+            }?.sortedByDescending { it.lastModified() }
+             ?.forEach { file ->
+                // 같은 파일이 이미 없을 때만 추가 (중복 방지)
+                if (scannedFiles.none { it.file.name == file.name }) {
                     scannedFiles.add(ScannedFile(
                         name = file.nameWithoutExtension,
-                        file = file, pageCount = 1,
+                        file = file,
+                        pageCount = 1,
                         createdAt = file.lastModified(),
-                        type = FileType.IMAGE))
+                        type = FileType.IMAGE
+                    ))
                 }
             }
         }
-        listOf(downloadDir, internalDir).forEach { dir ->
-            if (dir.exists()) {
-                dir.listFiles { f -> f.extension == "pdf" }?.forEach { file ->
-                    if (scannedFiles.none { it.file.absolutePath == file.absolutePath }) {
-                        scannedFiles.add(ScannedFile(
-                            name = file.nameWithoutExtension,
-                            file = file, pageCount = 0,
-                            createdAt = file.lastModified(),
-                            type = FileType.PDF))
-                    }
-                }
-            }
-        }
+
         scannedFiles.sortByDescending { it.createdAt }
         adapter.notifyDataSetChanged()
         updateEmptyState()
