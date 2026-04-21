@@ -21,17 +21,17 @@ class ScannedFileAdapter(
     inner class ViewHolder(private val binding: ItemScannedFileBinding)
         : RecyclerView.ViewHolder(binding.root) {
 
-        fun bind(file: ScannedFile) {
-            binding.tvFileName.text = file.name
-            binding.tvFileSize.text = file.fileSizeMb
-            binding.tvPageCount.text = if (file.pageCount > 0) "${file.pageCount}페이지" else "이미지"
-            binding.tvDate.text = dateFormat.format(Date(file.createdAt))
+       fun bind(file: ScannedFile) {
+    binding.tvFileName.text = file.name
+    binding.tvFileSize.text = file.fileSizeMb
+    binding.tvPageCount.text = if (file.pageCount > 0) "${file.pageCount}페이지" else "이미지"
+    binding.tvDate.text = dateFormat.format(Date(file.createdAt))
 
-            binding.root.setOnClickListener { onItemClick(file) }
-            binding.btnOcr.setOnClickListener { onOcrClick(file) }
-            binding.btnShare.setOnClickListener { onShareClick(file) }
-            binding.btnDelete.setOnClickListener { onDeleteClick(file) }
-        }
+    binding.root.setOnClickListener { onItemClick(file) }
+    binding.btnOcr.setOnClickListener { onOcrClick(file) }    // LinearLayout이라 그대로 동작
+    binding.btnShare.setOnClickListener { onShareClick(file) }
+    binding.btnDelete.setOnClickListener { onDeleteClick(file) }
+       } 
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
