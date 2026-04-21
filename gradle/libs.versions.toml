@@ -7,6 +7,9 @@ material = "1.12.0"
 constraintlayout = "2.1.4"
 mlkitDocumentScanner = "16.0.0-beta1"
 mlkitTextRecognitionKorean = "16.0.0"
+mlkitTextRecognitionChinese = "16.0.0"
+mlkitTextRecognitionJapanese = "16.0.0"
+mlkitTextRecognitionLatin = "16.0.0"
 activity = "1.9.0"
 lifecycle = "2.8.2"
 
@@ -19,6 +22,9 @@ androidx-activity-ktx = { group = "androidx.activity", name = "activity-ktx", ve
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 mlkit-document-scanner = { group = "com.google.android.gms", name = "play-services-mlkit-document-scanner", version.ref = "mlkitDocumentScanner" }
 mlkit-text-recognition-korean = { group = "com.google.mlkit", name = "text-recognition-korean", version.ref = "mlkitTextRecognitionKorean" }
+mlkit-text-recognition-chinese = { group = "com.google.mlkit", name = "text-recognition-chinese", version.ref = "mlkitTextRecognitionChinese" }
+mlkit-text-recognition-japanese = { group = "com.google.mlkit", name = "text-recognition-japanese", version.ref = "mlkitTextRecognitionJapanese" }
+mlkit-text-recognition-latin = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognitionLatin" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
