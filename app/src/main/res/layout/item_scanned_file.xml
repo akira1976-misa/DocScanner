@@ -1,3 +1,4 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <com.google.android.material.card.MaterialCardView
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -85,22 +86,46 @@
 
         </LinearLayout>
 
-        <!-- OCR 버튼 (텍스트 추출) -->
-        <ImageButton
+        <!-- OCR 버튼: 아이콘 + 텍스트 정사각형 -->
+        <LinearLayout
             android:id="@+id/btnOcr"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:src="@drawable/ic_ocr"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:orientation="vertical"
+            android:gravity="center"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="텍스트 추출"
-            android:tint="?attr/colorPrimary"
-            android:layout_marginStart="2dp" />
+            android:clickable="true"
+            android:focusable="true"
+            android:layout_marginStart="2dp">
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_ocr"
+                android:tint="?attr/colorPrimary"
+                android:contentDescription="@null"
+                android:clickable="false"
+                android:focusable="false" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="OCR"
+                android:textSize="9sp"
+                android:textColor="?attr/colorPrimary"
+                android:textStyle="bold"
+                android:gravity="center"
+                android:letterSpacing="0.05"
+                android:clickable="false"
+                android:focusable="false" />
+
+        </LinearLayout>
 
         <!-- 공유 버튼 -->
         <ImageButton
             android:id="@+id/btnShare"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
             android:src="@drawable/ic_share"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="공유"
@@ -111,8 +136,8 @@
         <!-- 삭제 버튼 -->
         <ImageButton
             android:id="@+id/btnDelete"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
             android:src="@drawable/ic_delete"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="삭제"
