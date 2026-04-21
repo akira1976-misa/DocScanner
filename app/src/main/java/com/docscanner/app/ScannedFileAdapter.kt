@@ -11,6 +11,7 @@ import java.util.Locale
 class ScannedFileAdapter(
     private val files: MutableList<ScannedFile>,
     private val onItemClick: (ScannedFile) -> Unit,
+    private val onOcrClick: (ScannedFile) -> Unit,
     private val onShareClick: (ScannedFile) -> Unit,
     private val onDeleteClick: (ScannedFile) -> Unit
 ) : RecyclerView.Adapter<ScannedFileAdapter.ViewHolder>() {
@@ -23,10 +24,11 @@ class ScannedFileAdapter(
         fun bind(file: ScannedFile) {
             binding.tvFileName.text = file.name
             binding.tvFileSize.text = file.fileSizeMb
-            binding.tvPageCount.text = if (file.pageCount > 0) "${file.pageCount}페이지" else "PDF"
+            binding.tvPageCount.text = if (file.pageCount > 0) "${file.pageCount}페이지" else "이미지"
             binding.tvDate.text = dateFormat.format(Date(file.createdAt))
 
             binding.root.setOnClickListener { onItemClick(file) }
+            binding.btnOcr.setOnClickListener { onOcrClick(file) }
             binding.btnShare.setOnClickListener { onShareClick(file) }
             binding.btnDelete.setOnClickListener { onDeleteClick(file) }
         }
