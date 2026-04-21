@@ -47,5 +47,8 @@ dependencies {
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.mlkit.document.scanner)
-    implementation(libs.mlkit.text.recognition.korean)
+    implementation(libs.mlkit.text.recognition.korean)   // 한국어
+    implementation(libs.mlkit.text.recognition.chinese)  // 한자/중국어
+    implementation(libs.mlkit.text.recognition.japanese) // 일본어
+    implementation(libs.mlkit.text.recognition.latin)    // 영어/기호/라틴계열
 }
