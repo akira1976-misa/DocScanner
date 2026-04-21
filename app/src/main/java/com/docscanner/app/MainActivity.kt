@@ -55,13 +55,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupScanner() {
         val options = GmsDocumentScannerOptions.Builder()
-            // SCANNER_MODE_BASE: 가이드 박스 떨림 없는 안정적인 수동 모드
             .setScannerMode(SCANNER_MODE_BASE)
             .setResultFormats(RESULT_FORMAT_PDF, RESULT_FORMAT_JPEG)
             .setPageLimit(20)
             .setGalleryImportAllowed(true)
             .build()
-
         scanner = GmsDocumentScanning.getClient(options)
         scannerLauncher = registerForActivityResult(
             ActivityResultContracts.StartIntentSenderForResult()
@@ -84,7 +82,6 @@ class MainActivity : AppCompatActivity() {
                 val baseName = "문서_$timestamp"
                 val pageCount = result.pdf?.pageCount ?: 1
 
-                // ── JPEG 페이지: 손가락 제거 후 갤러리 저장 ──
                 val jpegFiles = mutableListOf<File>()
                 result.pages?.forEachIndexed { index, page ->
                     val jpegName = "${baseName}_p${index + 1}.jpg"
@@ -97,15 +94,11 @@ class MainActivity : AppCompatActivity() {
                     if (saved != null) jpegFiles.add(saved)
                 }
 
-                // ── PDF 저장 (Downloads/DocScanner) ──
                 val pdfUri = result.pdf?.uri
                 if (pdfUri != null) {
-                    withContext(Dispatchers.IO) {
-                        savePdfToDownloads(pdfUri, "$baseName.pdf")
-                    }
+                    withContext(Dispatchers.IO) { savePdfToDownloads(pdfUri, "$baseName.pdf") }
                 }
 
-                // ── 목록에는 JPEG 대표 항목 1개만 추가 ──
                 val representFile = jpegFiles.firstOrNull()
                 if (representFile != null) {
                     val scannedFile = ScannedFile(
@@ -129,12 +122,88 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── OCR: 이미지에서 텍스트 추출 후 노트 앱으로 전송 ──────────
+    private fun runOcr(file: ScannedFile) {
+        showLoading(true)
+        showMessage("텍스트 인식 중...")
+        lifecycleScope.launch {
+            try {
+                val bitmap = withContext(Dispatchers.IO) {
+                    BitmapFactory.decodeFile(file.file.absolutePath)
+                }
+                if (bitmap == null) { showMessage("이미지를 불러올 수 없습니다."); return@launch }
+
+                val text = withContext(Dispatchers.Default) {
+                    OcrHelper.extractText(bitmap)
+                }
+
+                if (text.isBlank()) {
+                    showMessage("인식된 텍스트가 없습니다.")
+                    return@launch
+                }
+
+                // 추출된 텍스트를 노트 앱으로 전송
+                sendTextToNoteApp(text, file.name)
+
+            } catch (e: Exception) {
+                showMessage("텍스트 인식 실패: ${e.message}")
+            } finally {
+                showLoading(false)
+            }
+        }
+    }
+
+    private fun sendTextToNoteApp(text: String, title: String) {
+        // 1순위: 삼성노트
+        val samsungNoteIntent = packageManager.getLaunchIntentForPackage(
+            "com.samsung.android.app.notes"
+        )?.apply {
+            action = Intent.ACTION_SEND
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        // 2순위: Google Keep
+        val keepIntent = packageManager.getLaunchIntentForPackage(
+            "com.google.android.keep"
+        )?.apply {
+            action = Intent.ACTION_SEND
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        // 3순위: 범용 공유 (모든 텍스트 앱)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+            putExtra(Intent.EXTRA_SUBJECT, title)
+        }
+
+        when {
+            samsungNoteIntent != null -> {
+                startActivity(samsungNoteIntent)
+                showMessage("삼성노트로 전송했습니다 (${text.length}자)")
+            }
+            keepIntent != null -> {
+                startActivity(keepIntent)
+                showMessage("Google Keep으로 전송했습니다 (${text.length}자)")
+            }
+            else -> {
+                // 앱 선택창 표시
+                startActivity(Intent.createChooser(shareIntent, "텍스트 저장 — 앱 선택"))
+            }
+        }
+    }
+
     private fun saveCleanedJpeg(bitmap: Bitmap, fileName: String): File? {
         return try {
             val jpegBytes = ByteArrayOutputStream().also {
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)
             }.toByteArray()
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
@@ -217,19 +286,15 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // ── 파일 열기: MediaStore URI로 갤러리/삼성노트 선택창 표시 ───
     private fun openFile(file: ScannedFile) {
         try {
-            // MediaStore에서 URI 조회 (갤러리 앱이 인식하는 URI)
-            val uri = getMediaStoreUri(file.file)
-                ?: Uri.fromFile(file.file)
-
+            val uri = getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "image/jpeg")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
-            startActivity(Intent.createChooser(intent, "이미지 열기 — 갤러리 / 삼성노트"))
+            startActivity(Intent.createChooser(intent, "이미지 열기"))
         } catch (e: Exception) {
             showMessage("열기 실패: 갤러리 앱을 확인해 주세요.")
         }
@@ -237,7 +302,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun getMediaStoreUri(file: File): Uri? {
         return try {
-            // 파일명으로 MediaStore 검색
             val projection = arrayOf(MediaStore.Images.Media._ID)
             val selection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
             contentResolver.query(
@@ -274,7 +338,6 @@ class MainActivity : AppCompatActivity() {
             .setMessage("'${file.name}'을(를) 삭제하시겠습니까?")
             .setPositiveButton("삭제") { _, _ ->
                 val index = scannedFiles.indexOf(file)
-                // MediaStore에서도 삭제
                 try {
                     val uri = getMediaStoreUri(file.file)
                     if (uri != null) contentResolver.delete(uri, null, null)
@@ -289,20 +352,16 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ── 기존 파일 불러오기: JPEG만 로드해서 중복 제거 ─────────────
     private fun loadExistingFiles() {
         val picturesDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
             SAVE_FOLDER
         )
-
-        // Pictures/DocScanner 의 JPEG 파일만 로드
         if (picturesDir.exists()) {
             picturesDir.listFiles { f ->
                 f.extension.lowercase() in listOf("jpg", "jpeg")
             }?.sortedByDescending { it.lastModified() }
              ?.forEach { file ->
-                // 같은 파일이 이미 없을 때만 추가 (중복 방지)
                 if (scannedFiles.none { it.file.name == file.name }) {
                     scannedFiles.add(ScannedFile(
                         name = file.nameWithoutExtension,
@@ -314,7 +373,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-
         scannedFiles.sortByDescending { it.createdAt }
         adapter.notifyDataSetChanged()
         updateEmptyState()
@@ -323,7 +381,8 @@ class MainActivity : AppCompatActivity() {
     private fun setupRecyclerView() {
         adapter = ScannedFileAdapter(
             files = scannedFiles,
-            onItemClick = { file -> openFile(file) },
+            onItemClick  = { file -> openFile(file) },
+            onOcrClick   = { file -> runOcr(file) },
             onShareClick = { file -> shareFile(file) },
             onDeleteClick = { file -> deleteFile(file) }
         )
