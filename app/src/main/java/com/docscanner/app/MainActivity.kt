@@ -53,6 +53,11 @@ class MainActivity : AppCompatActivity() {
         loadExistingFiles()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        adapter.destroy()  // 어댑터 코루틴 + 캐시 정리
+    }
+
     private fun setupScanner() {
         val options = GmsDocumentScannerOptions.Builder()
             .setScannerMode(SCANNER_MODE_BASE)
@@ -73,7 +78,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── 스캔 결과 처리: 여러 페이지 → 1개 항목으로 저장 ──────────
     private fun processScanResult(result: GmsDocumentScanningResult?) {
         if (result == null) { showMessage("스캔 결과를 가져올 수 없습니다."); return }
         showLoading(true)
@@ -83,7 +87,6 @@ class MainActivity : AppCompatActivity() {
                 val baseName = "문서_$timestamp"
                 val pageCount = result.pdf?.pageCount ?: result.pages?.size ?: 1
 
-                // ── 각 페이지 JPEG 저장 ──
                 val jpegFiles = mutableListOf<File>()
                 result.pages?.forEachIndexed { index, page ->
                     val jpegName = "${baseName}_p${String.format("%02d", index + 1)}.jpg"
@@ -96,7 +99,6 @@ class MainActivity : AppCompatActivity() {
                     if (saved != null) jpegFiles.add(saved)
                 }
 
-                // ── PDF 저장 (Downloads/DocScanner) ──
                 val pdfUri = result.pdf?.uri
                 if (pdfUri != null) {
                     withContext(Dispatchers.IO) {
@@ -104,13 +106,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // ── 목록에 1개 항목으로 추가 (모든 페이지 포함) ──
                 val representFile = jpegFiles.firstOrNull()
                 if (representFile != null) {
                     val scannedFile = ScannedFile(
                         name         = baseName,
                         file         = representFile,
-                        allPageFiles = jpegFiles,       // 모든 페이지
+                        allPageFiles = jpegFiles,
                         pageCount    = pageCount,
                         createdAt    = System.currentTimeMillis(),
                         type         = FileType.IMAGE
@@ -118,7 +119,7 @@ class MainActivity : AppCompatActivity() {
                     scannedFiles.add(0, scannedFile)
                     adapter.notifyItemInserted(0)
                     binding.recyclerView.scrollToPosition(0)
-                    showMessage("✅ 저장 완료 — $pageCount 페이지를 1개 파일로 저장")
+                    showMessage("✅ 저장 완료 — $pageCount 페이지")
                 }
                 updateEmptyState()
             } catch (e: Exception) {
@@ -129,7 +130,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── 파일 열기: 여러 페이지면 PDF, 단일이면 이미지 ─────────────
+    // ── 파일 열기 ──────────────────────────────────────────────────
     private fun openFile(file: ScannedFile) {
         if (file.allPageFiles.size > 1) {
             // 여러 페이지: PDF로 열기
@@ -137,20 +138,23 @@ class MainActivity : AppCompatActivity() {
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                 "$SAVE_FOLDER/${file.name}.pdf"
             )
-            if (pdfFile.exists()) {
-                openPdfFile(pdfFile)
-                return
-            }
+            if (pdfFile.exists()) { openPdfFile(pdfFile); return }
         }
         // 단일 페이지: 이미지로 열기
         try {
-            val uri = getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "image/jpeg")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            val uri = getMediaStoreUri(file.file) ?: run {
+                // MediaStore에 없으면 FileProvider로 시도
+                androidx.core.content.FileProvider.getUriForFile(
+                    this, "${packageName}.fileprovider", file.file
+                )
             }
-            startActivity(Intent.createChooser(intent, "이미지 열기"))
+            startActivity(Intent.createChooser(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "image/jpeg")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }, "이미지 열기"
+            ))
         } catch (e: Exception) {
             showMessage("열기 실패: 갤러리 앱을 확인해 주세요.")
         }
@@ -161,26 +165,30 @@ class MainActivity : AppCompatActivity() {
             val uri = androidx.core.content.FileProvider.getUriForFile(
                 this, "${packageName}.fileprovider", pdfFile
             )
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/pdf")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            }
-            startActivity(Intent.createChooser(intent, "PDF 열기"))
+            startActivity(Intent.createChooser(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/pdf")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }, "PDF 열기"
+            ))
         } catch (e: Exception) {
             showMessage("PDF 뷰어 앱을 설치해 주세요.")
         }
     }
 
-    // ── OCR: 모든 페이지 텍스트 합쳐서 노트 앱 전송 ─────────────
+    // ── OCR: 모든 페이지 인식 후 노트 앱 전송 ────────────────────
     private fun runOcr(file: ScannedFile) {
         showLoading(true)
-        showMessage("텍스트 인식 중... (${file.allPageFiles.size}페이지)")
         lifecycleScope.launch {
             try {
+                val totalPages = file.allPageFiles.size
                 val allText = StringBuilder()
 
                 file.allPageFiles.forEachIndexed { index, pageFile ->
+                    // 진행 상황 표시
+                    showMessage("텍스트 인식 중... (${ index + 1}/$totalPages 페이지)")
+
                     val bitmap = withContext(Dispatchers.IO) {
                         BitmapFactory.decodeFile(pageFile.absolutePath)
                     } ?: return@forEachIndexed
@@ -190,11 +198,8 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     if (pageText.isNotBlank()) {
-                        if (file.allPageFiles.size > 1) {
-                            allText.append("── ${index + 1}페이지 ──\n")
-                        }
-                        allText.append(pageText)
-                        allText.append("\n\n")
+                        if (totalPages > 1) allText.append("── ${index + 1}페이지 ──\n")
+                        allText.append(pageText).append("\n\n")
                     }
                 }
 
@@ -213,31 +218,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── 노트 앱으로 텍스트 전송 ───────────────────────────────────
     private fun sendTextToNoteApp(text: String, title: String) {
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+        val baseIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, text)
             putExtra(Intent.EXTRA_SUBJECT, title)
         }
+
         val samsungPkg = "com.samsung.android.app.notes"
         val keepPkg    = "com.google.android.keep"
 
         when {
             isAppInstalled(samsungPkg) -> {
-                startActivity(Intent(shareIntent).apply {
-                    setPackage(samsungPkg)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
-                showMessage("삼성노트로 전송 (${text.length}자)")
+                try {
+                    startActivity(Intent(baseIntent).apply { setPackage(samsungPkg) })
+                    showMessage("삼성노트로 전송 완료 (${text.length}자)")
+                } catch (e: Exception) {
+                    // 삼성노트 실패 시 선택창으로 대체
+                    startActivity(Intent.createChooser(baseIntent, "텍스트 저장"))
+                }
             }
             isAppInstalled(keepPkg) -> {
-                startActivity(Intent(shareIntent).apply {
-                    setPackage(keepPkg)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
-                showMessage("Google Keep으로 전송 (${text.length}자)")
+                try {
+                    startActivity(Intent(baseIntent).apply { setPackage(keepPkg) })
+                    showMessage("Google Keep으로 전송 완료 (${text.length}자)")
+                } catch (e: Exception) {
+                    startActivity(Intent.createChooser(baseIntent, "텍스트 저장"))
+                }
             }
-            else -> startActivity(Intent.createChooser(shareIntent, "텍스트 저장 — 앱 선택"))
+            else -> {
+                startActivity(Intent.createChooser(baseIntent, "텍스트 저장 — 앱 선택"))
+            }
         }
     }
 
@@ -245,7 +257,79 @@ class MainActivity : AppCompatActivity() {
         packageManager.getPackageInfo(pkg, 0); true
     } catch (e: Exception) { false }
 
-    // ── 기존 파일 불러오기: 같은 세션 파일 그룹화 ────────────────
+    // ── 공유 버튼 ──────────────────────────────────────────────────
+    private fun shareFile(file: ScannedFile) {
+        try {
+            if (file.allPageFiles.size > 1) {
+                // 여러 페이지: PDF 공유
+                val pdfFile = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "$SAVE_FOLDER/${file.name}.pdf"
+                )
+                if (pdfFile.exists()) {
+                    val uri = try {
+                        androidx.core.content.FileProvider.getUriForFile(
+                            this, "${packageName}.fileprovider", pdfFile)
+                    } catch (e: Exception) { Uri.fromFile(pdfFile) }
+
+                    startActivity(Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "application/pdf"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }, "PDF 공유"
+                    ))
+                    return
+                }
+            }
+            // 단일 페이지: 이미지 공유
+            val uri = getMediaStoreUri(file.file) ?: run {
+                androidx.core.content.FileProvider.getUriForFile(
+                    this, "${packageName}.fileprovider", file.file)
+            }
+            startActivity(Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "image/jpeg"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }, "공유"
+            ))
+        } catch (e: Exception) {
+            showMessage("공유 실패: ${e.message}")
+        }
+    }
+
+    // ── 삭제 버튼 ──────────────────────────────────────────────────
+    private fun deleteFile(file: ScannedFile) {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("삭제 확인")
+            .setMessage("'${file.name}'\n${file.pageCount}페이지를 모두 삭제하시겠습니까?")
+            .setPositiveButton("삭제") { _, _ ->
+                val index = scannedFiles.indexOf(file)
+                file.allPageFiles.forEach { pageFile ->
+                    try {
+                        val uri = getMediaStoreUri(pageFile)
+                        if (uri != null) contentResolver.delete(uri, null, null)
+                        else pageFile.delete()
+                    } catch (e: Exception) { pageFile.delete() }
+                }
+                // PDF도 함께 삭제
+                val pdfFile = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "$SAVE_FOLDER/${file.name}.pdf"
+                )
+                if (pdfFile.exists()) pdfFile.delete()
+
+                scannedFiles.removeAt(index)
+                adapter.notifyItemRemoved(index)
+                updateEmptyState()
+                showMessage("삭제되었습니다.")
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    // ── 기존 파일 불러오기 ─────────────────────────────────────────
     private fun loadExistingFiles() {
         val picturesDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
@@ -257,7 +341,7 @@ class MainActivity : AppCompatActivity() {
             f.extension.lowercase() in listOf("jpg", "jpeg")
         } ?: run { updateEmptyState(); return }
 
-        // "문서_20260409_134500_p01.jpg" → 기준명 "문서_20260409_134500"
+        // 파일명의 _p01, _p02 등을 제거해서 그룹화
         val grouped = allFiles.groupBy { file ->
             file.nameWithoutExtension.replace(Regex("_p\\d+$"), "")
         }
@@ -279,6 +363,25 @@ class MainActivity : AppCompatActivity() {
         scannedFiles.sortByDescending { it.createdAt }
         adapter.notifyDataSetChanged()
         updateEmptyState()
+    }
+
+    // ── MediaStore URI 조회 ────────────────────────────────────────
+    private fun getMediaStoreUri(file: File): Uri? {
+        return try {
+            val projection = arrayOf(MediaStore.Images.Media._ID)
+            val selection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
+            contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection, selection, arrayOf(file.name), null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+                    Uri.withAppendedPath(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
+                } else null
+            }
+        } catch (e: Exception) { null }
     }
 
     private fun saveCleanedJpeg(bitmap: Bitmap, fileName: String): File? {
@@ -368,87 +471,12 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    private fun getMediaStoreUri(file: File): Uri? {
-        return try {
-            val projection = arrayOf(MediaStore.Images.Media._ID)
-            val selection = "${MediaStore.Images.Media.DISPLAY_NAME} = ?"
-            contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection, selection, arrayOf(file.name), null
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(
-                        cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
-                    Uri.withAppendedPath(
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
-                } else null
-            }
-        } catch (e: Exception) { null }
-    }
-
-    private fun shareFile(file: ScannedFile) {
-        try {
-            // 여러 페이지면 PDF 공유, 단일이면 이미지 공유
-            if (file.allPageFiles.size > 1) {
-                val pdfFile = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                    "$SAVE_FOLDER/${file.name}.pdf"
-                )
-                if (pdfFile.exists()) {
-                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                        this, "${packageName}.fileprovider", pdfFile)
-                    startActivity(Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).apply {
-                            type = "application/pdf"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }, "PDF 공유"
-                    ))
-                    return
-                }
-            }
-            val uri = getMediaStoreUri(file.file) ?: Uri.fromFile(file.file)
-            startActivity(Intent.createChooser(
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "image/jpeg"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }, "공유"
-            ))
-        } catch (e: Exception) {
-            showMessage("공유 실패: ${e.message}")
-        }
-    }
-
-    private fun deleteFile(file: ScannedFile) {
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("삭제 확인")
-            .setMessage("'${file.name}'\n${file.pageCount}페이지를 모두 삭제하시겠습니까?")
-            .setPositiveButton("삭제") { _, _ ->
-                val index = scannedFiles.indexOf(file)
-                // 모든 페이지 파일 삭제
-                file.allPageFiles.forEach { pageFile ->
-                    try {
-                        val uri = getMediaStoreUri(pageFile)
-                        if (uri != null) contentResolver.delete(uri, null, null)
-                        else pageFile.delete()
-                    } catch (e: Exception) { pageFile.delete() }
-                }
-                scannedFiles.removeAt(index)
-                adapter.notifyItemRemoved(index)
-                updateEmptyState()
-                showMessage("삭제되었습니다.")
-            }
-            .setNegativeButton("취소", null)
-            .show()
-    }
-
     private fun setupRecyclerView() {
         adapter = ScannedFileAdapter(
-            files        = scannedFiles,
-            onItemClick  = { file -> openFile(file) },
-            onOcrClick   = { file -> runOcr(file) },
-            onShareClick = { file -> shareFile(file) },
+            files         = scannedFiles,
+            onItemClick   = { file -> openFile(file) },
+            onOcrClick    = { file -> runOcr(file) },
+            onShareClick  = { file -> shareFile(file) },
             onDeleteClick = { file -> deleteFile(file) }
         )
         binding.recyclerView.apply {
