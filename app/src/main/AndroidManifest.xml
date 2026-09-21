@@ -7,6 +7,24 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- Android 11+: 설치 앱 감지 허용 -->
+    <queries>
+        <package android:name="com.samsung.android.app.notes" />
+        <package android:name="com.google.android.keep" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/pdf" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="image/jpeg" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -29,7 +47,6 @@
             android:name=".PdfViewerActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity" />
-
 
         <provider
             android:name="androidx.core.content.FileProvider"
