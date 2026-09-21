@@ -141,25 +141,26 @@ object FingerRemover {
         return result
     }
 
-    private fun floodFill(
-        mask: BooleanArray, result: BooleanArray, visited: BooleanArray,
-        startX: Int, startY: Int, w: Int, h: Int
-    ) {
-        val queue = ArrayDeque<Pair<Int, Int>>()
-        queue.add(startX to startY)
-        while (queue.isNotEmpty()) {
-            val (x, y) = queue.removeFirst()
-            val idx = y * w + x
-            if (x < 0 || x >= w || y < 0 || y >= h) continue
-            if (visited[idx] || !mask[idx]) continue
-            visited[idx] = true
-            result[idx] = true
-            queue.add((x - 1) to y)
-            queue.add((x + 1) to y)
-            queue.add(x to (y - 1))
-            queue.add(x to (y + 1))
-        }
+   private fun floodFill(
+    mask: BooleanArray, result: BooleanArray, visited: BooleanArray,
+    startX: Int, startY: Int, w: Int, h: Int
+) {
+    val queue = ArrayDeque<Pair<Int, Int>>()
+    queue.add(startX to startY)
+    while (queue.isNotEmpty()) {
+        val (x, y) = queue.removeFirst()
+        // ── 경계 체크를 idx 계산 전에 수행 (ArrayIndexOutOfBoundsException 방지) ──
+        if (x < 0 || x >= w || y < 0 || y >= h) continue
+        val idx = y * w + x
+        if (visited[idx] || !mask[idx]) continue
+        visited[idx] = true
+        result[idx] = true
+        queue.add((x - 1) to y)
+        queue.add((x + 1) to y)
+        queue.add(x to (y - 1))
+        queue.add(x to (y + 1))
     }
+}
 
     // ── 마스크 팽창 ────────────────────────────────────────────────
     private fun dilateMask(mask: BooleanArray, w: Int, h: Int, radius: Int): BooleanArray {
